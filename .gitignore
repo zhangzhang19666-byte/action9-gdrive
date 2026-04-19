@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.db
+*.json
+input/
+output/
+_data/
+_cookie_repo/
+*.log
+.env
