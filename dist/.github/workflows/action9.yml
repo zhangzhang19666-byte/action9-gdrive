@@ -1,0 +1,114 @@
+name: Action 9 — 抓取上传 GDrive 自动循环
+
+# 公开库，无敏感信息。
+# 所有凭证、DB、cookie 均通过 secrets 或私密库注入。
+# 所需 secrets（在公开库 Settings → Secrets 配置）：
+#   G_CLIENT_ID         Google OAuth Client ID
+#   G_CLIENT_SECRET     Google OAuth Client Secret
+#   G_REFRESH_TOKEN     Google OAuth Refresh Token
+#   GDRIVE_ROOT_FOLDER  GDrive 根文件夹 ID（私密）
+#   DATA_REPO           私密数据库 repo，格式 owner/repo-name
+#   DATA_REPO_TOKEN     有 contents:write 权限的 PAT（访问私密库）
+#   GH_PAT              有 workflow 权限的 PAT（触发下一次运行）
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: '并行 worker 数（默认8）'
+        required: false
+        default: '8'
+      time_limit:
+        description: '单次运行时间上限（秒，默认18000=5h）'
+        required: false
+        default: '18000'
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # 6h 硬上限
+
+    permissions:
+      contents: read   # 公开库只需读，写操作均在私密库
+
+    steps:
+      - name: Checkout Public Code
+        uses: actions/checkout@v4
+
+      - name: Checkout Private Data Repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.DATA_REPO }}
+          token:      ${{ secrets.DATA_REPO_TOKEN }}
+          path:       _data
+
+      - name: Restore DB and Cookies from Private Repo
+        run: |
+          mkdir -p output input/cookies
+          # DB（首次运行时不存在，跳过）
+          if [ -f "_data/output/global_tasks.db" ]; then
+            cp _data/output/global_tasks.db output/global_tasks.db
+            echo "✅ DB 已恢复 ($(du -sh output/global_tasks.db | cut -f1))"
+          else
+            echo "ℹ️  DB 不存在，首次运行"
+          fi
+          # Douyin cookie
+          cp _data/input/cookies/douyin_cookie_1.json input/cookies/douyin_cookie_1.json
+          echo "✅ Cookie 已恢复"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests pyyaml
+          sudo apt-get install -y aria2
+
+      - name: Run Action 9 Loop
+        env:
+          G_CLIENT_ID:          ${{ secrets.G_CLIENT_ID }}
+          G_CLIENT_SECRET:      ${{ secrets.G_CLIENT_SECRET }}
+          G_REFRESH_TOKEN:      ${{ secrets.G_REFRESH_TOKEN }}
+          GDRIVE_ROOT_FOLDER:   ${{ secrets.GDRIVE_ROOT_FOLDER }}
+        run: |
+          python action9_loop.py \
+            --workers     "${{ github.event.inputs.workers || '8' }}" \
+            --time_limit  "${{ github.event.inputs.time_limit || '18000' }}"
+
+      - name: Push DB Back to Private Repo
+        if: always()
+        run: |
+          mkdir -p _data/output
+          if [ -f "output/global_tasks.db" ]; then
+            cp output/global_tasks.db _data/output/global_tasks.db
+            cd _data
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add output/global_tasks.db
+            git diff --cached --quiet || git commit -m "chore: action9 db update [skip ci]"
+            BRANCH_NAME=$(git branch --show-current)
+            git pull --rebase origin $BRANCH_NAME || true
+            git push origin HEAD
+            echo "✅ DB 已推送到私密库"
+          else
+            echo "ℹ️  无 DB 文件，跳过推送"
+          fi
+
+      - name: Trigger Next Run (if continuation needed)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -f "output/.continuation_needed" ]; then
+            echo "📌 检测到续跑标志，5秒后触发下一次运行..."
+            sleep 5
+            gh workflow run action9.yml \
+              --repo "${{ github.repository }}" \
+              --field workers="${{ github.event.inputs.workers || '8' }}" \
+              --field time_limit="${{ github.event.inputs.time_limit || '18000' }}"
+            echo "✅ 下一次运行已触发"
+          else
+            echo "✅ 无续跑需求，任务完成"
+          fi
