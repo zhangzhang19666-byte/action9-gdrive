@@ -23,6 +23,9 @@ on:
         required: false
         default: '18000'
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   loop:
     runs-on: ubuntu-latest
@@ -59,7 +62,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.14-dev'
 
       - name: Install Dependencies
         run: |
@@ -75,7 +78,10 @@ jobs:
         run: |
           python action9_loop.py \
             --workers     "${{ github.event.inputs.workers || '8' }}" \
-            --time_limit  "${{ github.event.inputs.time_limit || '18000' }}"
+            --time_limit  "${{ github.event.inputs.time_limit || '18000' }}" \
+            --g_client_id     "$G_CLIENT_ID" \
+            --g_client_secret "$G_CLIENT_SECRET" \
+            --g_refresh_token "$G_REFRESH_TOKEN"
 
       - name: Push DB Back to Private Repo
         if: always()

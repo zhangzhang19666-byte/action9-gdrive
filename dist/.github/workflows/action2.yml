@@ -1,0 +1,81 @@
+name: Action 2 — 单用户极速抓取与上传
+
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: '包含抖音链接的分享文本 (必填)'
+        required: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  single_user:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Public Code
+        uses: actions/checkout@v4
+
+      - name: Checkout Private Data Repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.DATA_REPO }}
+          token:      ${{ secrets.DATA_REPO_TOKEN }}
+          path:       _data
+
+      - name: Restore DB and Cookies from Private Repo
+        run: |
+          mkdir -p output input/cookies
+          if [ -f "_data/output/global_tasks.db" ]; then
+            cp _data/output/global_tasks.db output/global_tasks.db
+            echo "✅ DB 已恢复 ($(du -sh output/global_tasks.db | cut -f1))"
+          else
+            echo "ℹ️  DB 不存在，首次运行"
+          fi
+          cp _data/input/cookies/douyin_cookie_1.json input/cookies/douyin_cookie_1.json
+          echo "✅ Cookie 已恢复"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14-dev'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests pyyaml
+          sudo apt-get install -y aria2
+
+      - name: Run Action 2 Single User
+        env:
+          G_CLIENT_ID:          ${{ secrets.G_CLIENT_ID }}
+          G_CLIENT_SECRET:      ${{ secrets.G_CLIENT_SECRET }}
+          G_REFRESH_TOKEN:      ${{ secrets.G_REFRESH_TOKEN }}
+          GDRIVE_ROOT_FOLDER:   ${{ secrets.GDRIVE_ROOT_FOLDER }}
+        run: |
+          python action2_single.py \
+            --text "${{ github.event.inputs.text }}"
+
+      - name: Push DB Back to Private Repo
+        if: always()
+        run: |
+          mkdir -p _data/output
+          if [ -f "output/global_tasks.db" ]; then
+            cp output/global_tasks.db _data/output/global_tasks.db
+            cd _data
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add output/global_tasks.db
+            git diff --cached --quiet || git commit -m "chore: action2 db update [skip ci]"
+            BRANCH_NAME=$(git branch --show-current)
+            git pull --rebase origin $BRANCH_NAME || true
+            git push origin HEAD
+            echo "✅ DB 已推送到私密库"
+          else
+            echo "ℹ️  无 DB 文件，跳过推送"
+          fi

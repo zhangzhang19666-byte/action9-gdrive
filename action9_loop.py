@@ -134,12 +134,31 @@ class GDriveClient:
                     break
                 end     = uploaded + len(chunk) - 1
                 is_last = (end + 1 >= total)
-                resp = requests.put(up_url, data=chunk, headers={
-                    "Content-Type":  "application/octet-stream",
-                    "Content-Range": f"bytes {uploaded}-{end}/{total if is_last else '*'}",
-                }, timeout=300)
-                if resp.status_code not in (200, 201, 308):
-                    raise RuntimeError(f"上传块失败 {resp.status_code}: {resp.text[:120]}")
+                
+                max_retries = 5
+                for attempt in range(max_retries):
+                    try:
+                        resp = requests.put(up_url, data=chunk, headers={
+                            "Content-Type":  "application/octet-stream",
+                            "Content-Range": f"bytes {uploaded}-{end}/{total if is_last else '*'}",
+                        }, timeout=300)
+                        
+                        # 5xx server errors might be transient
+                        if resp.status_code in (500, 502, 503, 504) and attempt < max_retries - 1:
+                            logger.warning(f"   ⚠️  GDrive 服务器错误 {resp.status_code}，正在重试上传块 ({attempt + 1}/{max_retries})...")
+                            time.sleep(5)
+                            continue
+                            
+                        if resp.status_code not in (200, 201, 308):
+                            raise RuntimeError(f"上传块失败 {resp.status_code}: {resp.text[:120]}")
+                        break
+                    except requests.exceptions.RequestException as e:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"   ⚠️  GDrive 块上传中断 ({e})，正在重试 ({attempt + 1}/{max_retries})...")
+                            time.sleep(5)
+                        else:
+                            raise RuntimeError(f"GDrive 块上传重试 {max_retries} 次后仍失败: {e}")
+                            
                 uploaded += len(chunk)
 
                 mb_done = uploaded / 1024 / 1024
@@ -183,24 +202,57 @@ def _download(url: str, tmp_path: str, filename: str) -> None:
             return
         logger.warning(f"   ⚠️  aria2c 失败 (rc={result.returncode})，改用 requests")
 
-    # requests 回退
-    with requests.get(url, stream=True, headers={"User-Agent": "Mozilla/5.0"},
-                      timeout=120) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("Content-Length", 0))
-        downloaded, last_log, t0 = 0, 0.0, time.time()
-        with open(tmp_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    mb = downloaded / 1024 / 1024
-                    if mb - last_log >= 50:
-                        elapsed = time.time() - t0
-                        spd = downloaded / elapsed / 1024 / 1024 if elapsed > 0 else 0
-                        tot_s = f"/{total/1024/1024:.0f}" if total else ""
-                        logger.info(f"   ⬇️  {filename}: {mb:.0f}{tot_s}MB  {spd:.1f}MB/s")
-                        last_log = mb
+    # requests 回退 (支持断点续传与重试)
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            downloaded = 0
+            if os.path.exists(tmp_path):
+                downloaded = os.path.getsize(tmp_path)
+            
+            if downloaded > 0:
+                headers["Range"] = f"bytes={downloaded}-"
+                
+            with requests.get(url, stream=True, headers=headers, timeout=120) as r:
+                if r.status_code == 416: # 已经下载完成
+                    return
+                r.raise_for_status()
+                
+                total_remaining = int(r.headers.get("Content-Length", 0))
+                if r.status_code == 206:
+                    mode = "ab"
+                    total = downloaded + total_remaining
+                    session_downloaded = 0
+                else:
+                    mode = "wb"
+                    downloaded = 0
+                    total = total_remaining
+                    session_downloaded = 0
+
+                last_log = downloaded / 1024 / 1024
+                t0 = time.time()
+                with open(tmp_path, mode) as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            session_downloaded += len(chunk)
+                            mb = downloaded / 1024 / 1024
+                            if mb - last_log >= 20:
+                                elapsed = time.time() - t0
+                                spd = session_downloaded / elapsed / 1024 / 1024 if elapsed > 0 else 0
+                                tot_s = f"/{total/1024/1024:.0f}" if total else ""
+                                logger.info(f"   ⬇️  {filename}: {mb:.0f}{tot_s}MB  {spd:.1f}MB/s")
+                                last_log = mb
+            # 完整读取未抛异常则成功
+            return
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"   ⚠️  requests 下载中止 ({e})，正在断点重试 ({attempt + 1}/{max_retries})...")
+                time.sleep(5)
+            else:
+                raise RuntimeError(f"requests 重试 {max_retries} 次后仍失败: {e}")
 
 
 # ── DB 辅助 ───────────────────────────────────────────────────
