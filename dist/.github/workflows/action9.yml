@@ -22,6 +22,9 @@ on:
         description: '单次运行时间上限（秒，默认18000=5h）'
         required: false
         default: '18000'
+  schedule:
+    # 每天北京时间 02:00 (UTC 18:00) 和 14:00 (UTC 06:00) 各启动一次，间隔 12 小时
+    - cron: '0 6,18 * * *'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -45,21 +48,11 @@ jobs:
           token:      ${{ secrets.DATA_REPO_TOKEN }}
           path:       _data
 
-      - name: Restore DB and Cookies from Private Repo
+      - name: Restore Cookies and Works List
         run: |
           mkdir -p output input/cookies
-          # DB（首次运行时不存在，跳过）
-          if [ -f "_data/output/global_tasks.db" ]; then
-            cp _data/output/global_tasks.db output/global_tasks.db
-            echo "✅ DB 已恢复 ($(du -sh output/global_tasks.db | cut -f1))"
-          else
-            echo "ℹ️  DB 不存在，首次运行"
-          fi
-          # Douyin cookie
           cp _data/input/cookies/douyin_cookie_1.json input/cookies/douyin_cookie_1.json
           echo "✅ Cookie 已恢复"
-
-          # Works list
           if [ -f "_data/input/douyin_works.json" ]; then
             cp _data/input/douyin_works.json input/douyin_works.json
             echo "✅ douyin_works.json 已恢复"
@@ -77,6 +70,25 @@ jobs:
           pip install requests pyyaml
           sudo apt-get install -y aria2
 
+      - name: Download DB from GDrive
+        env:
+          G_CLIENT_ID:        ${{ secrets.G_CLIENT_ID }}
+          G_CLIENT_SECRET:    ${{ secrets.G_CLIENT_SECRET }}
+          G_REFRESH_TOKEN:    ${{ secrets.G_REFRESH_TOKEN }}
+          GDRIVE_ROOT_FOLDER: ${{ secrets.GDRIVE_ROOT_FOLDER }}
+        run: |
+          python gdrive_db_sync.py --action download --db_path output/global_tasks.db || true
+          # 首次迁移时 GDrive 还没有 DB，回退到 _data 仓库中的旧版
+          if [ ! -f "output/global_tasks.db" ] && [ -f "_data/output/global_tasks.db" ]; then
+            cp _data/output/global_tasks.db output/global_tasks.db
+            echo "ℹ️  GDrive 无 DB，使用 _data 备份版（迁移过渡）"
+          fi
+          if [ -f "output/global_tasks.db" ]; then
+            echo "✅ DB 已就绪 ($(du -sh output/global_tasks.db | cut -f1))"
+          else
+            echo "ℹ️  无 DB，首次运行"
+          fi
+
       - name: Run Action 9 Loop
         env:
           G_CLIENT_ID:          ${{ secrets.G_CLIENT_ID }}
@@ -91,23 +103,18 @@ jobs:
             --g_client_secret "$G_CLIENT_SECRET" \
             --g_refresh_token "$G_REFRESH_TOKEN"
 
-      - name: Push DB Back to Private Repo
+      - name: Upload DB to GDrive
         if: always()
+        env:
+          G_CLIENT_ID:        ${{ secrets.G_CLIENT_ID }}
+          G_CLIENT_SECRET:    ${{ secrets.G_CLIENT_SECRET }}
+          G_REFRESH_TOKEN:    ${{ secrets.G_REFRESH_TOKEN }}
+          GDRIVE_ROOT_FOLDER: ${{ secrets.GDRIVE_ROOT_FOLDER }}
         run: |
-          mkdir -p _data/output
           if [ -f "output/global_tasks.db" ]; then
-            cp output/global_tasks.db _data/output/global_tasks.db
-            cd _data
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add output/global_tasks.db
-            git diff --cached --quiet || git commit -m "chore: action9 db update [skip ci]"
-            BRANCH_NAME=$(git branch --show-current)
-            git pull --rebase origin $BRANCH_NAME || true
-            git push origin HEAD
-            echo "✅ DB 已推送到私密库"
+            python gdrive_db_sync.py --action upload --db_path output/global_tasks.db
           else
-            echo "ℹ️  无 DB 文件，跳过推送"
+            echo "ℹ️  无 DB 文件，跳过上传"
           fi
 
       - name: Trigger Next Run (if continuation needed)
