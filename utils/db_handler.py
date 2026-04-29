@@ -43,10 +43,16 @@ class DBHandler:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         for t in tasks_data:
+            # 使用 UPSERT (ON CONFLICT) 逻辑: 
+            # 如果 item_id 已存在, 且处于重试状态 (status=3), 则重置为待处理 (status=1)
             cursor.execute('''
-                INSERT OR IGNORE INTO tasks
+                INSERT INTO tasks 
                 (item_id, title, url, filename, folder_name, user_url, media_type, create_time, status, extracted_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(item_id) DO UPDATE SET
+                    status = excluded.status,
+                    extracted_at = excluded.extracted_at
+                WHERE tasks.status = 3
             ''', (t['item_id'], t['title'], t['url'], t['filename'], t['folder_name'],
                   t['user_url'], t['media_type'], t['create_time'], t.get('status', 1)))
         conn.commit()

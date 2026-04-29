@@ -59,6 +59,14 @@ jobs:
           cp _data/input/cookies/douyin_cookie_1.json input/cookies/douyin_cookie_1.json
           echo "✅ Cookie 已恢复"
 
+          # Works list
+          if [ -f "_data/input/douyin_works.json" ]; then
+            cp _data/input/douyin_works.json input/douyin_works.json
+            echo "✅ douyin_works.json 已恢复"
+          else
+            echo "⚠️  警告: 未找到 douyin_works.json"
+          fi
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:

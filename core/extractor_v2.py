@@ -164,9 +164,10 @@ class BatchProcessor:
                 base = {"title": item["desc"], "folder_name": username, "user_url": profile_url, "create_time": item["create_time"]}
                 non_video_status = 1 if self.download_all else 3
 
-                # 视频 item_id 直接使用 aweme_id (去除 _v 后缀)
-                for v in item["videos"]:
-                    self.batch_buffer.append({**base, "item_id": str(item['aweme_id']), "url": v["url"], "filename": v["filename"], "media_type": "video", "status": 1})
+                # 视频 item_id: 第一个视频保持原 aweme_id，后续视频增加索引后缀
+                for i, v in enumerate(item["videos"]):
+                    v_item_id = str(item['aweme_id']) if i == 0 else f"{item['aweme_id']}_v_{i}"
+                    self.batch_buffer.append({**base, "item_id": v_item_id, "url": v["url"], "filename": v["filename"], "media_type": "video", "status": 1})
                     count += 1
                 
                 # 图片和音频仍需后缀以保证同一帖子内不冲突
@@ -191,7 +192,8 @@ class BatchProcessor:
         cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookie_data.get("cookies", []))
         client = DouYinAPIClient(cookie_str)
 
-        if self.retry_queue:
+        # 仅在全局扫描模式下处理重试队列，避免单博主循环模式下重复抓取
+        if self.retry_queue and not self.target_username:
             logger.info(f"♻️ 发现 {len(self.retry_queue)} 个博主需要重抓...")
             for i, (name, url) in enumerate(self.retry_queue, 1):
                 self.process_user(name, url, client, i, len(self.retry_queue))

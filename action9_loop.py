@@ -375,29 +375,27 @@ class Action9:
                 os.remove(tmp_path)
 
     def _process_user(self, username: str, idx: int, total: int):
-        # 已在之前的运行中抓取过 → 跳过（不重抓、不重下）
-        if user_already_scraped(self.db_path, username):
-            logger.info(f"[{idx}/{total}] ⏩ {username} 已抓取，跳过")
-            return
-
         logger.info(f"\n{'='*60}")
-        logger.info(f"[{idx}/{total}] 👤 {username}  已运行={self._elapsed()/60:.0f}min")
+        logger.info(f"[{idx}/{total}] 正在处理 {username}  已运行 {self._elapsed()/60:.0f}min")
 
-        # Step 1: 抓取（所有类型写入 DB）
-        logger.info("  🔍 抓取中...")
-        try:
-            BatchProcessor(
-                json_file       = self.json_file,
-                output_root     = str(Path(self.db_path).parent),
-                cookie_path     = self.cookie_path,
-                limit           = 0,
-                download_all    = True,
-                target_username = username,
-            ).run()
-        except Exception as e:
-            logger.error(f"  ❌ 抓取失败: {e}")
+        # Step 1: 抓取（如果已存在抓取记录则跳过，但需进入 Step 2 检查未完成的下载）
+        if user_already_scraped(self.db_path, username):
+            logger.info(f"  ⏭️  {username} 已抓取，跳过 Scraping 步骤。")
+        else:
+            logger.info("  🔍 抓取中...")
+            try:
+                BatchProcessor(
+                    json_file       = self.json_file,
+                    output_root     = str(Path(self.db_path).parent),
+                    cookie_path     = self.cookie_path,
+                    limit           = 0,
+                    download_all    = True,
+                    target_username = username,
+                ).run()
+            except Exception as e:
+                logger.error(f"  ❌ 抓取失败: {e}")
 
-        # Step 2: 只下载视频
+        # Step 2: 只下载视频 (不论刚才是否执行了抓取)
         pending = get_pending_videos(self.db_path, username)
         counts  = count_by_user(self.db_path, username)
         logger.info(
@@ -406,7 +404,7 @@ class Action9:
         )
 
         if not pending:
-            logger.info("  ✅ 无待下载视频，跳过")
+            logger.info("  ✅ 无待下载视频。")
             with self._cnt_lock:
                 self.total_users_done += 1
             return
@@ -446,6 +444,19 @@ class Action9:
         self.start_time = time.time()
         logger.info(f"⚙️  aria2={'可用' if _ARIA2_AVAILABLE else '不可用(requests模式)'}  "
                     f"workers={self.workers}  time_limit={self.time_limit/3600:.1f}h")
+
+        # 1. 在开始循环前，先执行一次全局重试队列 (Status 3) 的抓取
+        logger.info("🔄 正在执行启动前的全局失效任务重试 (Status 3)...")
+        try:
+            BatchProcessor(
+                json_file       = self.json_file,
+                output_root     = str(Path(self.db_path).parent),
+                cookie_path     = self.cookie_path,
+                limit           = 0,
+                download_all    = True,
+            ).run()
+        except Exception as e:
+            logger.error(f"⚠️  初始重试抓取失败 (已跳过): {e}")
 
         authors = json.loads(Path(self.json_file).read_text(encoding="utf-8"))
         logger.info(f"👥 共 {len(authors)} 个用户（只下载视频）")
