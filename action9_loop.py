@@ -215,6 +215,9 @@ def _download(url: str, tmp_path: str, filename: str) -> None:
                 headers["Range"] = f"bytes={downloaded}-"
                 
             with requests.get(url, stream=True, headers=headers, timeout=120) as r:
+                if r.status_code == 403:
+                    # 403 Forbidden 意味着 URL 已过期，无需重试
+                    raise RuntimeError("403 Forbidden")
                 if r.status_code == 416: # 已经下载完成
                     return
                 r.raise_for_status()
@@ -248,6 +251,10 @@ def _download(url: str, tmp_path: str, filename: str) -> None:
             # 完整读取未抛异常则成功
             return
         except Exception as e:
+            err_str = str(e)
+            if "403" in err_str:
+                # 403 错误直接抛出，不进行重试
+                raise
             if attempt < max_retries - 1:
                 logger.warning(f"   ⚠️  requests 下载中止 ({e})，正在断点重试 ({attempt + 1}/{max_retries})...")
                 time.sleep(5)
@@ -366,9 +373,12 @@ class Action9:
             return True, ""
 
         except Exception as e:
+            err_str = str(e)
+            # 403 Forbidden 意味着 URL 已失效，设置为状态 3 (待重抓) 以便下次运行自动刷新
+            final_status = 3 if "403" in err_str else 4
             with self._db_lock:
-                self.db.update_status([item_id], 4)
-            return False, str(e)
+                self.db.update_status([item_id], final_status)
+            return False, err_str
 
         finally:
             if os.path.exists(tmp_path):
