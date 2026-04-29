@@ -1,12 +1,9 @@
 name: Action 9 — 每日定时抓取 + 上传 GDrive (安全限流版)
 
-# 环境变量配置说明：
-#   G_CLIENT_ID         Google OAuth Client ID
-#   G_CLIENT_SECRET     Google OAuth Client Secret
-#   G_REFRESH_TOKEN     Google OAuth Refresh Token
-#   GDRIVE_ROOT_FOLDER  GDrive 根文件夹 ID
-#   DATA_REPO           数据仓库 (owner/repo)
-#   DATA_REPO_TOKEN     私有仓库访问令牌 (PAT)
+# 所需 secrets：
+#   G_CLIENT_ID / G_CLIENT_SECRET / G_REFRESH_TOKEN / GDRIVE_ROOT_FOLDER
+#   DATA_REPO / DATA_REPO_TOKEN  (cookie & works list 私密库)
+#   GH_PAT                       (触发续跑用)
 
 on:
   workflow_dispatch:
@@ -18,9 +15,8 @@ on:
         description: '限时运行(秒)'
         default: '18000'
   schedule:
-    # 每天北京时间凌晨 02:00 启动 (UTC 18:00)
-    # 运行 5 小时后停止，确保每天只有一波高流量，降低封号风险
-    - cron: '0 18 * * *'
+    # 北京时间 02:00 (UTC 18:00) 和 14:00 (UTC 06:00)，间隔 12 小时
+    - cron: '0 6,18 * * *'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -41,31 +37,50 @@ jobs:
           token:      ${{ secrets.DATA_REPO_TOKEN }}
           path:       _data
 
-      - name: Restore DB
+      - name: Restore Cookies and Works List
         run: |
           mkdir -p output input/cookies
-          [ -f "_data/output/global_tasks.db" ] && cp _data/output/global_tasks.db output/global_tasks.db
           cp _data/input/cookies/douyin_cookie_1.json input/cookies/douyin_cookie_1.json
-          [ -f "_data/input/douyin_works.json" ] && cp _data/input/douyin_works.json input/douyin_works.json
+          echo "✅ Cookie 已恢复"
+          if [ -f "_data/input/douyin_works.json" ]; then
+            cp _data/input/douyin_works.json input/douyin_works.json
+            echo "✅ douyin_works.json 已恢复"
+          else
+            echo "⚠️  未找到 douyin_works.json"
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
 
       - name: Install Dependencies
         run: |
           pip install requests pyyaml
           sudo apt-get install -y aria2
 
+      - name: Download DB from GDrive
+        env:
+          G_CLIENT_ID:        ${{ secrets.G_CLIENT_ID }}
+          G_CLIENT_SECRET:    ${{ secrets.G_CLIENT_SECRET }}
+          G_REFRESH_TOKEN:    ${{ secrets.G_REFRESH_TOKEN }}
+          GDRIVE_ROOT_FOLDER: ${{ secrets.GDRIVE_ROOT_FOLDER }}
+        run: |
+          python gdrive_db_sync.py --action download --db_path output/global_tasks.db || true
+          # 首次迁移：GDrive 无 DB 时回退到 _data 旧版
+          if [ ! -f "output/global_tasks.db" ] && [ -f "_data/output/global_tasks.db" ]; then
+            cp _data/output/global_tasks.db output/global_tasks.db
+            echo "ℹ️  GDrive 无 DB，使用 _data 备份版（迁移过渡）"
+          fi
+          [ -f "output/global_tasks.db" ] && echo "✅ DB 就绪 ($(du -sh output/global_tasks.db | cut -f1))" || echo "ℹ️  首次运行，无 DB"
+
       - name: Run Action 9
         env:
-          G_CLIENT_ID:          ${{ secrets.G_CLIENT_ID }}
-          G_CLIENT_SECRET:      ${{ secrets.G_CLIENT_SECRET }}
-          G_REFRESH_TOKEN:      ${{ secrets.G_REFRESH_TOKEN }}
-          GDRIVE_ROOT_FOLDER:   ${{ secrets.GDRIVE_ROOT_FOLDER }}
+          G_CLIENT_ID:        ${{ secrets.G_CLIENT_ID }}
+          G_CLIENT_SECRET:    ${{ secrets.G_CLIENT_SECRET }}
+          G_REFRESH_TOKEN:    ${{ secrets.G_REFRESH_TOKEN }}
+          GDRIVE_ROOT_FOLDER: ${{ secrets.GDRIVE_ROOT_FOLDER }}
         run: |
-          # 运行 18000 秒 (5小时)
           python action9_loop.py \
             --workers     "${{ github.event.inputs.workers || '8' }}" \
             --time_limit  "${{ github.event.inputs.time_limit || '18000' }}" \
@@ -73,19 +88,33 @@ jobs:
             --g_client_secret "$G_CLIENT_SECRET" \
             --g_refresh_token "$G_REFRESH_TOKEN"
 
-      - name: Sync DB Back
+      - name: Upload DB to GDrive
         if: always()
+        env:
+          G_CLIENT_ID:        ${{ secrets.G_CLIENT_ID }}
+          G_CLIENT_SECRET:    ${{ secrets.G_CLIENT_SECRET }}
+          G_REFRESH_TOKEN:    ${{ secrets.G_REFRESH_TOKEN }}
+          GDRIVE_ROOT_FOLDER: ${{ secrets.GDRIVE_ROOT_FOLDER }}
         run: |
-          mkdir -p _data/output
           if [ -f "output/global_tasks.db" ]; then
-            cp output/global_tasks.db _data/output/global_tasks.db
-            cd _data
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add output/global_tasks.db
-            git diff --cached --quiet || git commit -m "chore: daily db update [skip ci]"
-            git push origin HEAD
+            python gdrive_db_sync.py --action upload --db_path output/global_tasks.db
+          else
+            echo "ℹ️  无 DB 文件，跳过上传"
           fi
 
-      - name: Finish
-        run: echo "本轮 5 小时运行结束。已停止自动触发，等待明天的定时任务。"
+      - name: Trigger Next Run (if continuation needed)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -f "output/.continuation_needed" ]; then
+            echo "📌 检测到续跑标志，5秒后触发下一次..."
+            sleep 5
+            gh workflow run action9.yml \
+              --repo "${{ github.repository }}" \
+              --field workers="${{ github.event.inputs.workers || '8' }}" \
+              --field time_limit="${{ github.event.inputs.time_limit || '18000' }}"
+            echo "✅ 下一次运行已触发"
+          else
+            echo "✅ 无续跑需求，任务完成"
+          fi
